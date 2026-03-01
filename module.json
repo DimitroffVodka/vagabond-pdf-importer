@@ -1,0 +1,18 @@
+{
+  "id": "vagabond-pdf-importer",
+  "title": "Vagabond PDF Importer",
+  "description": "Import Vagabond characters from the official PDF character sheet.",
+  "version": "1.0.0",
+  "compatibility": {
+    "minimum": "12",
+    "verified": "13"
+  },
+  "authors": [{ "name": "Custom" }],
+  "scripts": ["scripts/vagabond-pdf-importer.js"],
+  "styles": ["styles/vagabond-pdf-importer.css"],
+  "languages": [],
+  "esmodules": [],
+  "relationships": {
+    "systems": [{ "id": "vagabond", "type": "system" }]
+  }
+}

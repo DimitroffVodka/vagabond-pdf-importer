@@ -1,0 +1,78 @@
+/* Vagabond PDF Importer */
+
+/* ── Directory Button ─────────────────────────────────────────────── */
+.vpi-btn {
+  width: 100%;
+  margin-top: 4px;
+  background: #4a3728;
+  border: 1px solid #7a5c3a;
+  color: #e8d5b0;
+  cursor: pointer;
+  padding: 6px 10px;
+  border-radius: 3px;
+  font-family: "Modesto Condensed", "Palatino Linotype", serif;
+  font-size: 14px;
+  letter-spacing: 0.03em;
+  transition: background 0.15s;
+}
+.vpi-btn:hover { background: #6b4e34; border-color: #c8963a; }
+.vpi-btn i     { margin-right: 5px; }
+
+/* ── Dialog ───────────────────────────────────────────────────────── */
+.vpi-dialog .window-content { padding: 12px; background: #f8f3eb; }
+
+.vpi-body {
+  display: flex; flex-direction: column; gap: 12px;
+  font-family: "Signika", sans-serif; font-size: 13px;
+}
+.vpi-intro { margin: 0; color: #333; }
+
+/* ── Drop Zone ────────────────────────────────────────────────────── */
+.vpi-drop-zone {
+  border: 2px dashed #a08060; border-radius: 6px; padding: 22px;
+  text-align: center; cursor: pointer; background: #fffdf5; color: #7a5c3a;
+  transition: all 0.15s; display: flex; flex-direction: column;
+  align-items: center; gap: 8px;
+}
+.vpi-drop-zone:hover, .vpi-drop-zone.vpi-over {
+  border-color: #c8963a; background: #fff8e8; color: #4a3728;
+}
+.vpi-drop-icon { font-size: 28px; color: #c8963a; }
+.vpi-drop-zone span { font-size: 12px; }
+
+/* ── Preview ──────────────────────────────────────────────────────── */
+.vpi-preview {
+  background: #fffdf5; border: 1px solid #c8a97a;
+  border-radius: 4px; padding: 10px 14px;
+}
+.vpi-preview-header { border-bottom: 1px solid #d4b896; padding-bottom: 7px; margin-bottom: 8px; }
+.vpi-name {
+  font-size: 17px; font-weight: bold; color: #2c1a0e;
+  font-family: "Modesto Condensed", serif; letter-spacing: 0.05em;
+}
+.vpi-sub { font-size: 11px; color: #7a5c3a; margin-top: 2px; }
+
+.vpi-row {
+  display: flex; gap: 6px; margin-bottom: 5px;
+  font-size: 12px; align-items: flex-start;
+}
+.vpi-row label {
+  font-weight: bold; color: #5a3e28; min-width: 105px; flex-shrink: 0;
+}
+.vpi-row span { color: #333; }
+.vpi-sm { font-size: 11px; color: #555; }
+
+.vpi-stat-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.vpi-stat {
+  display: flex; flex-direction: column; align-items: center;
+  background: #4a3728; color: #e8d5b0; border-radius: 3px;
+  padding: 3px 7px; min-width: 34px;
+}
+.vpi-stat span { font-size: 9px; letter-spacing: 0.05em; opacity: 0.8; }
+.vpi-stat b    { font-size: 14px; }
+
+/* ── Status Bar ───────────────────────────────────────────────────── */
+.vpi-status      { font-size: 12px; padding: 4px 8px; border-radius: 3px; min-height: 22px; }
+.vpi-status--loading { background: #e8f4ff; color: #1a5a8a; }
+.vpi-status--ok      { background: #e8f8e8; color: #1a6b1a; }
+.vpi-status--error   { background: #fce8e8; color: #8a1a1a; }
