@@ -7,12 +7,14 @@
     "minimum": "12",
     "verified": "13"
   },
-  "authors": [{ "name": "Custom" }],
+  "authors": [{ "name": "DimitroffVodka" }],
   "scripts": ["scripts/vagabond-pdf-importer.js"],
   "styles": ["styles/vagabond-pdf-importer.css"],
   "languages": [],
   "esmodules": [],
   "relationships": {
     "systems": [{ "id": "vagabond", "type": "system" }]
-  }
+  },
+  "download": "https://github.com/DimitroffVodka/vagabond-pdf-importer/releases/download/1.0.0/module.zip",
+  "manifest": "https://raw.githubusercontent.com/DimitroffVodka/vagabond-pdf-importer/main/module.json"
 }
