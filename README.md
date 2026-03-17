@@ -15,16 +15,14 @@ Go to [https://vgbnd.app/](https://vgbnd.app/) and build your character using th
 
 ### Step 2 — Export as PDF
 
-1. Once your character is ready, navigate to the **Print Hero** section from the Settings in the upper right hand corner
-2. Print the page and choose **Save as PDF** to save the file to your computer
+1. Once your character is ready, navigate to the **Print Hero** section
+2. Instead of printing, choose **Save as PDF** to save the file to your computer
 
 ### Step 3 — Import into Foundry
 
 1. Open Foundry VTT and navigate to your World
-2. On the Actors tabe there is an option at the bottom that says "Import from PDF"
-![Import from PDF](image.png)
-3. Use the **Vagabond PDF Importer** module to import your saved PDF on the Actor Screen
-4. Your character will be created as an Actor in Foundry with all stats populated
+2. Use the **Vagabond PDF Importer** module to import your saved PDF
+3. Your character will be created as an Actor in Foundry with all stats populated
 
 ## Installation
 

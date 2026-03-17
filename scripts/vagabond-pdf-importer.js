@@ -286,18 +286,20 @@ class VagabondPDFParser {
   }
 
   _abilities() {
-    const traits = [], classFeatures = [];
+    const traits = [], classFeatures = [], perks = [];
     let section  = null;
     for (const l of this._parsePage2().rightLines) {
       if (/^ABILITIES$/i.test(l))        continue;
       if (/^TRAITS$/i.test(l))           { section = "traits"; continue; }
       if (/^CLASS FEATURES$/i.test(l))   { section = "class";  continue; }
+      if (/^PERKS$/i.test(l))            { section = "perks";  continue; }
       if (/^SPELLS\s+MANA/i.test(l))     { section = null;     continue; }
       if (!l || !section) continue;
       if (section === "traits")  traits.push(l);
       if (section === "class")   classFeatures.push(l);
+      if (section === "perks")   perks.push(l);
     }
-    return { traits, classFeatures };
+    return { traits, classFeatures, perks };
   }
 
   _titleCase(s) {
@@ -376,22 +378,421 @@ async function findInPack(packId, name) {
   return await pack.getDocument(entry._id);
 }
 
-// For inventory items, try weapon → armor → gear in order
-async function findInventoryItem(name) {
-  // Try weapon packs with fuzzy suffix match (handles "Minor Striking Light hammer")
-  const weaponIndex = await _getPackIndex("vagabond.weapons");
-  const weaponEntry = weaponIndex.find(e =>
-    name.toLowerCase() === e.name.toLowerCase() ||
-    name.toLowerCase().endsWith(e.name.toLowerCase())
-  );
-  if (weaponEntry) {
-    return await game.packs.get("vagabond.weapons").getDocument(weaponEntry._id);
+// ── Item Modifier Parsing (Relics, Metals) ──────────────────────────────────
+
+// Map display names in parentheses to system.metal values
+const METAL_MAP = {
+  "adamant":    "adamant",
+  "cold iron":  "coldIron",
+  "silver":     "silver",
+  "mythral":    "mythral",
+  "orichalcum": "orichalcum",
+  "orichalum":  "orichalcum",  // common typo
+  "magical":    "magical",
+};
+
+/**
+ * Parse an item name for relic modifiers: +N bonus, metal type, protection, spell power.
+ * Examples:
+ *   "+1 Heavy Armor of Major Protection (Orichalum)"
+ *       → { bonus:1, metal:"orichalcum", protectionBonus:3, spellPowerBonus:0, baseName:"Heavy Armor" }
+ *   "Crossbow, light of Major Spell Power"
+ *       → { bonus:0, metal:null, protectionBonus:0, spellPowerBonus:3, baseName:"Crossbow, light" }
+ *   "+2 Whip, leather"  → { bonus:2, metal:null, ..., baseName:"Whip, leather" }
+ *   "Bedroll"           → { bonus:0, metal:null, ..., baseName:"Bedroll" }
+ */
+function parseItemModifiers(name) {
+  let baseName = name;
+  let bonus = 0;
+  let metal = null;
+  let protectionBonus = 0;
+  let spellPowerBonus = 0;
+
+  // Extract metal type from parenthetical at end: "... (Cold Iron)"
+  const metalMatch = baseName.match(/\s*\(([^)]+)\)\s*$/);
+  if (metalMatch) {
+    const metalKey = metalMatch[1].toLowerCase().trim();
+    if (METAL_MAP[metalKey]) {
+      metal = METAL_MAP[metalKey];
+      baseName = baseName.slice(0, metalMatch.index).trim();
+    }
   }
 
-  for (const packId of ["vagabond.armor", "vagabond.gear"]) {
-    const doc = await findInPack(packId, name);
+  // Extract relic bonus prefix: "+1 ", "+2 ", etc.
+  const bonusMatch = baseName.match(/^\+(\d+)\s+/);
+  if (bonusMatch) {
+    bonus = parseInt(bonusMatch[1]);
+    baseName = baseName.slice(bonusMatch[0].length).trim();
+  }
+
+  // Extract Protection suffix: "of Minor Protection", "of Protection", "of Major Protection"
+  const protMatch = baseName.match(/\s+of\s+(Minor\s+|Major\s+)?Protection$/i);
+  if (protMatch) {
+    const tier = (protMatch[1] || "").trim().toLowerCase();
+    protectionBonus = tier === "minor" ? 1 : tier === "major" ? 3 : 2;
+    baseName = baseName.slice(0, protMatch.index).trim();
+  }
+
+  // Extract Spell Power suffix: "of Minor Spell Power", "of Spell Power", "of Major Spell Power"
+  const spellMatch = baseName.match(/\s+of\s+(Minor\s+|Major\s+)?Spell\s+Power$/i);
+  if (spellMatch) {
+    const tier = (spellMatch[1] || "").trim().toLowerCase();
+    spellPowerBonus = tier === "minor" ? 1 : tier === "major" ? 3 : 2;
+    baseName = baseName.slice(0, spellMatch.index).trim();
+  }
+
+  return { bonus, metal, baseName, protectionBonus, spellPowerBonus };
+}
+
+// ── Relic Power Pattern Registry ──────────────────────────────────────────────
+// Maps name fragments (prefix/suffix) to power configs matching the Relic Forge output.
+// Sorted longest-first within each list for correct greedy matching.
+
+const RELIC_PREFIX_POWERS = [
+  // Ace (adds weapon property)
+  { p: "ace thrown",   pw: { id: "ace-thrown",   name: "Thrown",   cost: 2000, addProperty: "Thrown" } },
+  { p: "brutal",       pw: { id: "ace-brutal",   name: "Brutal",   cost: 2000, addProperty: "Brutal" } },
+  { p: "cleaving",     pw: { id: "ace-cleave",   name: "Cleave",   cost: 2000, addProperty: "Cleave" } },
+  { p: "entangling",   pw: { id: "ace-entangle", name: "Entangle", cost: 1000, addProperty: "Entangle" } },
+  { p: "keen",         pw: { id: "ace-keen",      name: "Keen",    cost: 2000, addProperty: "Keen" } },
+  { p: "long",         pw: { id: "ace-long",      name: "Long",    cost: 1000, addProperty: "Long" } },
+  // Strike
+  { p: "major striking", pw: { id: "strike-3", name: "Strike III", cost: 50000, changes: [{ key: "system.universalWeaponDamageDice", mode: 2, value: "3" }] } },
+  { p: "minor striking", pw: { id: "strike-1", name: "Strike I",   cost: 1000,  changes: [{ key: "system.universalWeaponDamageDice", mode: 2, value: "1" }] } },
+  { p: "striking",       pw: { id: "strike-2", name: "Strike II",  cost: 10000, changes: [{ key: "system.universalWeaponDamageDice", mode: 2, value: "2" }] } },
+  // Lifesteal
+  { p: "major lifestealing", pw: { id: "utility-lifesteal-3", name: "Lifesteal III", cost: 50000, flags: { onKillHealDice: "3d8" } } },
+  { p: "minor lifestealing", pw: { id: "utility-lifesteal-1", name: "Lifesteal I",   cost: 5000,  flags: { onKillHealDice: "1d8" } } },
+  { p: "lifestealing",       pw: { id: "utility-lifesteal-2", name: "Lifesteal II",  cost: 20000, flags: { onKillHealDice: "2d8" } } },
+  // Manasteal
+  { p: "major manastealing", pw: { id: "utility-manasteal-3", name: "Manasteal III", cost: 50000, flags: { onKillManaDice: "3d8" } } },
+  { p: "minor manastealing", pw: { id: "utility-manasteal-1", name: "Manasteal I",   cost: 5000,  flags: { onKillManaDice: "1d8" } } },
+  { p: "manastealing",       pw: { id: "utility-manasteal-2", name: "Manasteal II",  cost: 20000, flags: { onKillManaDice: "2d8" } } },
+  // Resistance (X Resistant)
+  { p: "fire resistant",     pw: { id: "resistance-resistance", name: "Fire Resistance",     cost: 2500, flags: { damageResistance: "fire" } } },
+  { p: "acid resistant",     pw: { id: "resistance-resistance", name: "Acid Resistance",     cost: 2500, flags: { damageResistance: "acid" } } },
+  { p: "shock resistant",    pw: { id: "resistance-resistance", name: "Shock Resistance",    cost: 2500, flags: { damageResistance: "shock" } } },
+  { p: "poison resistant",   pw: { id: "resistance-resistance", name: "Poison Resistance",   cost: 2500, flags: { damageResistance: "poison" } } },
+  { p: "cold resistant",     pw: { id: "resistance-resistance", name: "Cold Resistance",     cost: 2500, flags: { damageResistance: "cold" } } },
+  { p: "necrotic resistant", pw: { id: "resistance-resistance", name: "Necrotic Resistance", cost: 2500, flags: { damageResistance: "necrotic" } } },
+  { p: "psychic resistant",  pw: { id: "resistance-resistance", name: "Psychic Resistance",  cost: 2500, flags: { damageResistance: "psychic" } } },
+  { p: "physical resistant", pw: { id: "resistance-resistance", name: "Physical Resistance", cost: 2500, flags: { damageResistance: "physical" } } },
+  { p: "magical resistant",  pw: { id: "resistance-resistance", name: "Magical Resistance",  cost: 2500, flags: { damageResistance: "magical" } } },
+  // Resistance saves
+  { p: "brave",        pw: { id: "resistance-bravery",   name: "Bravery",   cost: 150, flags: { favorOnSaveVs: "fear" } } },
+  { p: "clear-minded", pw: { id: "resistance-clarity",   name: "Clarity",   cost: 150, flags: { favorOnSaveVs: "charm" } } },
+  { p: "repulsing",    pw: { id: "resistance-repulsing", name: "Repulsing", cost: 150, flags: { favorOnSaveVs: "deception" } } },
+  // Senses
+  { p: "true-seeing", pw: { id: "senses-truesight", name: "True-Seeing", cost: 20000, flags: { senses: { trueSight: true } } } },
+  // Movement
+  { p: "climbing",  pw: { id: "movement-climbing", name: "Climbing",  cost: 2000,  flags: { movement: { climb: true } } } },
+  { p: "swimming",  pw: { id: "movement-waterwalk", name: "Waterwalk", cost: 2000,  flags: { movement: { waterwalk: true } } } },
+  { p: "blinking",  pw: { id: "movement-blink",    name: "Blinking",  cost: 10000, flags: { movement: { blink: true } } } },
+  { p: "flying",    pw: { id: "movement-flying",    name: "Flying",    cost: 50000, flags: { movement: { fly: true } } } },
+  // Swiftness
+  { p: "major swift", pw: { id: "movement-swiftness-3", name: "Swiftness III", cost: 20000, changes: [{ key: "system.speed.bonus", mode: 2, value: "15" }] } },
+  { p: "minor swift", pw: { id: "movement-swiftness-1", name: "Swiftness I",   cost: 2000,  changes: [{ key: "system.speed.bonus", mode: 2, value: "5" }] } },
+  { p: "swift",       pw: { id: "movement-swiftness-2", name: "Swiftness II",  cost: 5000,  changes: [{ key: "system.speed.bonus", mode: 2, value: "10" }] } },
+  // Utility
+  { p: "diplomatic",   pw: { id: "utility-ambassador", name: "Ambassador", cost: 1250, flags: { speakAllLanguages: true } } },
+  { p: "warning",      pw: { id: "utility-warning",    name: "Warning",    cost: 7500, flags: { cannotBeSurprised: true } } },
+  { p: "cloaked",      pw: { id: "utility-invisibility-1", name: "Invisibility I", cost: 5000, flags: { invisibility: 1 } } },
+  { p: "enthralling",  pw: { id: "utility-enthralling",  name: "Enthralling",  cost: 2500, flags: { enthralling: true } } },
+  { p: "commanding",   pw: { id: "utility-commanding",   name: "Commanding",   cost: 5000, flags: { commanding: true } } },
+  { p: "inspiring",    pw: { id: "utility-inspiring",     name: "Inspiring",    cost: 5000, flags: { inspiring: true } } },
+  { p: "intimidating", pw: { id: "utility-intimidating",  name: "Intimidating", cost: 2500, flags: { intimidating: true } } },
+  // Moonlit / Radiant / Horrifying (tiered)
+  { p: "major moonlit",    pw: { id: "utility-moonlit-3",    name: "Moonlit III",    cost: 20000, flags: { moonlit: 3 } } },
+  { p: "minor moonlit",    pw: { id: "utility-moonlit-1",    name: "Moonlit I",      cost: 2000,  flags: { moonlit: 1 } } },
+  { p: "moonlit",          pw: { id: "utility-moonlit-2",    name: "Moonlit II",     cost: 5000,  flags: { moonlit: 2 } } },
+  { p: "major radiant",    pw: { id: "utility-radiant-3",    name: "Radiant III",    cost: 20000, flags: { radiant: 3 } } },
+  { p: "minor radiant",    pw: { id: "utility-radiant-1",    name: "Radiant I",      cost: 2000,  flags: { radiant: 1 } } },
+  { p: "radiant",          pw: { id: "utility-radiant-2",    name: "Radiant II",     cost: 5000,  flags: { radiant: 2 } } },
+  { p: "major horrifying",  pw: { id: "utility-horrifying-3", name: "Horrifying III", cost: 20000, flags: { horrifying: 3 } } },
+  { p: "minor horrifying",  pw: { id: "utility-horrifying-1", name: "Horrifying I",   cost: 2000,  flags: { horrifying: 1 } } },
+  { p: "horrifying",        pw: { id: "utility-horrifying-2", name: "Horrifying II",  cost: 5000,  flags: { horrifying: 2 } } },
+  // Combat element strikes
+  { p: "venomous",     pw: { id: "combat-poison-1",  name: "Poison I",   cost: 100, flags: { onHitDamageType: "poison",  onHitDamageDice: "1d6" } } },
+  { p: "acidic",       pw: { id: "combat-acid-1",    name: "Acid I",     cost: 100, flags: { onHitDamageType: "acid",    onHitDamageDice: "1d6" } } },
+  { p: "shocking",     pw: { id: "combat-shock-1",   name: "Shock I",    cost: 100, flags: { onHitDamageType: "shock",   onHitDamageDice: "1d6" } } },
+  { p: "electrifying", pw: { id: "combat-shock-2",   name: "Shock II",   cost: 500, flags: { onHitDamageType: "shock",   onHitDamageDice: "2d6" } } },
+  { p: "flaming",      pw: { id: "combat-fire-1",    name: "Fire I",     cost: 100, flags: { onHitDamageType: "fire",    onHitDamageDice: "1d6" } } },
+  { p: "freezing",     pw: { id: "combat-cold-1",    name: "Cold I",     cost: 100, flags: { onHitDamageType: "cold",    onHitDamageDice: "1d6" } } },
+  { p: "withering",    pw: { id: "combat-necrotic-1", name: "Necrotic I", cost: 100, flags: { onHitDamageType: "necrotic", onHitDamageDice: "1d6" } } },
+  { p: "maddening",    pw: { id: "combat-psychic-1", name: "Psychic I",  cost: 100, flags: { onHitDamageType: "psychic", onHitDamageDice: "1d6" } } },
+  { p: "sundering",    pw: { id: "combat-sunder-1",  name: "Sunder I",   cost: 100, flags: { onHitSunder: true } } },
+];
+
+const RELIC_SUFFIX_POWERS = [
+  { p: "major invisibility", pw: { id: "utility-invisibility-3", name: "Invisibility III", cost: 50000, flags: { invisibility: 3 } } },
+  { p: "minor invisibility", pw: { id: "utility-invisibility-1", name: "Invisibility I",   cost: 5000,  flags: { invisibility: 1 } } },
+  { p: "invisibility",       pw: { id: "utility-invisibility-2", name: "Invisibility II",  cost: 20000, flags: { invisibility: 2 } } },
+  { p: "teleportation", pw: { id: "movement-teleportation", name: "Teleportation", cost: 10000, flags: { movement: { teleport: true } } } },
+  { p: "recall",        pw: { id: "movement-recall",        name: "Recall",        cost: 5000,  flags: { movement: { recall: true } } } },
+  { p: "webwalking",    pw: { id: "movement-webwalk",       name: "Webwalk",       cost: 5000,  flags: { movement: { webwalk: true } } } },
+  { p: "climbing",      pw: { id: "movement-climbing",      name: "Climbing",      cost: 2000,  flags: { movement: { climb: true } } } },
+];
+
+/**
+ * Detect relic powers by comparing the baseName against the compendium item name.
+ * Extracts prefix (before base item) and suffix (after base item), then matches
+ * against known relic power patterns.
+ *
+ * @param {string} baseName   — item name with +N, metal, protection, spell power stripped
+ * @param {string} compName   — the matched compendium entry name
+ * @param {object} mods       — parsed modifiers from parseItemModifiers()
+ * @param {string} equipType  — "weapon", "armor", or "gear"
+ * @returns {object[]} array of detected power definitions
+ */
+function detectRelicPowers(baseName, compName, mods, equipType) {
+  const powers = [];
+  const isWeapon = equipType === "weapon";
+  const isArmor  = equipType === "armor";
+
+  // ── Powers from parseItemModifiers (bonus, protection, spell power) ──
+  if (mods.bonus > 0 && isWeapon) {
+    const t = mods.bonus;
+    powers.push({ id: `bonus-weapon-${t}`, name: `Weapon +${t}`, cost: [1000, 10000, 50000][t-1] || 1000,
+      changes: [{ key: "system.universalWeaponDamageBonus", mode: 2, value: String(t) }] });
+  }
+  if (mods.bonus > 0 && isArmor) {
+    const t = mods.bonus;
+    powers.push({ id: `bonus-armor-${t}`, name: `Armor +${t}`, cost: [100, 5000, 50000][t-1] || 100,
+      changes: [{ key: "system.armorBonus", mode: 2, value: String(t) }] });
+  }
+  if (mods.protectionBonus > 0) {
+    const t = mods.protectionBonus;
+    const tier = t === 1 ? "Minor " : t === 3 ? "Major " : "";
+    powers.push({ id: `bonus-protection-${t}`, name: `${tier}Protection`, cost: [1000, 10000, 100000][t-1] || 1000,
+      changes: [{ key: "system.saveBonus", mode: 2, value: String(t) }] });
+  }
+  if (mods.spellPowerBonus > 0) {
+    const t = mods.spellPowerBonus;
+    const tier = t === 1 ? "Minor " : t === 3 ? "Major " : "";
+    powers.push({ id: `bonus-trinket-${t}`, name: `${tier}Spell Power`, cost: [200, 2500, 10000][t-1] || 200,
+      changes: [{ key: "system.universalSpellDamageBonus", mode: 2, value: String(t) }] });
+  }
+
+  // ── Extract prefix and suffix from baseName vs compendium name ──
+  const baseL = baseName.toLowerCase();
+  const compL = compName.toLowerCase();
+  const idx = baseL.indexOf(compL);
+  if (idx === -1) return powers; // can't determine prefix/suffix
+
+  let prefix = baseName.slice(0, idx).trim().toLowerCase();
+  let suffix = baseName.slice(idx + compName.length).trim().replace(/^of\s+/i, "").toLowerCase();
+
+  // ── Match prefix powers (greedy, longest first) ──
+  while (prefix.length > 0) {
+    let matched = false;
+    for (const { p, pw } of RELIC_PREFIX_POWERS) {
+      if (prefix === p || prefix.startsWith(p + " ")) {
+        powers.push(pw);
+        prefix = prefix.slice(p.length).trim();
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) {
+      // Check for Bane wrap pattern: "{creature}'s bane"
+      const baneMatch = prefix.match(/^(.+?)['']s\s+bane$/i);
+      if (baneMatch) {
+        const creature = baneMatch[1];
+        powers.push({ id: "bane-specific", name: `${creature}'s Bane`, cost: 2000,
+          flags: { baneDice: "2d6", baneTarget: creature, baneScope: "specific" } });
+        prefix = "";
+      } else {
+        break; // unknown prefix, stop matching
+      }
+    }
+  }
+
+  // ── Match suffix powers ──
+  if (suffix.length > 0) {
+    for (const { p, pw } of RELIC_SUFFIX_POWERS) {
+      if (suffix === p) { powers.push(pw); break; }
+    }
+    // Store Spell: suffix is a spell name like "Fireball"
+    if (powers.length === 0 && suffix.length > 0 && !suffix.includes(" ")) {
+      powers.push({ id: "utility-storespell", name: `Store Spell (${suffix})`, cost: 0,
+        flags: { storeSpell: suffix } });
+    }
+  }
+
+  return powers;
+}
+
+/**
+ * Apply relic/metal modifiers to an item object before adding to actor.
+ * Matches the exact output format of the Relic Forge system.
+ */
+function applyItemModifiers(obj, mods, originalName) {
+  if (!obj.system) return;
+
+  const isWeapon = obj.system.equipmentType === "weapon";
+  const isArmor  = obj.system.equipmentType === "armor";
+  const compName = obj.name; // original compendium name (e.g. "Heavy Armor")
+  const nameChanged = originalName.toLowerCase() !== compName.toLowerCase();
+  const hasModifiers = mods.bonus > 0 || mods.metal || mods.protectionBonus > 0 || mods.spellPowerBonus > 0;
+  const isRelic = hasModifiers || nameChanged;
+
+  if (!isRelic) return; // nothing to modify
+
+  // ── Detect all relic powers ──
+  const powers = detectRelicPowers(mods.baseName, compName, mods, obj.system.equipmentType);
+
+  // ── Set metal type ──
+  if (mods.metal) {
+    obj.system.metal = mods.metal;
+  } else if ((isWeapon || isArmor) &&
+             (!obj.system.metal || obj.system.metal === "none" || obj.system.metal === "common")) {
+    obj.system.metal = "magical";
+  }
+
+  // ── Create Active Effects for each power ──
+  if (!obj.effects) obj.effects = [];
+  for (const pw of powers) {
+    // Ace powers add weapon properties instead of AEs
+    if (pw.addProperty) {
+      if (!obj.system.properties) obj.system.properties = [];
+      if (!obj.system.properties.includes(pw.addProperty)) {
+        obj.system.properties.push(pw.addProperty);
+      }
+      // Still create a marker AE for the relic forge
+      obj.effects.push(_makeRelicEffect(pw.name, [], pw.id, pw.flags || {}));
+      continue;
+    }
+    obj.effects.push(_makeRelicEffect(pw.name, pw.changes || [], pw.id, pw.flags || {}));
+  }
+
+  // ── Set system.lore ──
+  if (powers.length > 0) {
+    obj.system.lore = "Forged with: " + powers.map(p => p.name).join(", ");
+  }
+
+  // ── Set system.baseCost.gold (base + sum of power costs) ──
+  const powerCostGold = powers.reduce((sum, p) => sum + (p.cost || 0), 0);
+  if (powerCostGold > 0 && obj.system.baseCost) {
+    const baseCostGold = obj.system.baseCost.gold || 0;
+    const baseCostSilver = obj.system.baseCost.silver || 0;
+    obj.system.baseCost.gold = baseCostGold + Math.floor(baseCostSilver / 10) + powerCostGold;
+    obj.system.baseCost.silver = baseCostSilver % 10;
+  }
+
+  // ── Set flags.vagabond.relicForge metadata ──
+  if (!obj.flags) obj.flags = {};
+  if (!obj.flags.vagabond) obj.flags.vagabond = {};
+  obj.flags.vagabond.relicForge = {
+    baseItemName: compName,
+    baseItemUuid: "",   // filled by Foundry if we had the UUID
+    powerIds: powers.map(p => p.id),
+    powerCostGold,
+    userInputs: {},
+  };
+
+  // ── Rename to match the PDF name ──
+  if (originalName !== obj.name) {
+    obj.name = originalName;
+  }
+}
+
+/** Helper: create an Active Effect matching the Relic Forge format */
+function _makeRelicEffect(name, changes, powerId, extraFlags) {
+  const vagabondFlags = {
+    applicationMode: "when-equipped",
+    relicPower: powerId || "",
+    ...extraFlags,
+  };
+  return {
+    name,
+    img: "icons/svg/aura.svg",
+    type: "base",
+    system: {},
+    changes: (changes || []).map(c => ({ ...c, priority: c.priority ?? null })),
+    disabled: false,
+    transfer: true,
+    statuses: [],
+    flags: { vagabond: vagabondFlags },
+  };
+}
+
+// Strip parenthetical modifiers like "(Cold Iron)", "(Silver)" from item names
+function _stripModifiers(name) {
+  return name.replace(/\s*\([^)]*\)\s*/g, "").trim();
+}
+
+// For inventory items, search across all item packs for the best match.
+// Handles relic naming: prefixes ("Fire Resistant Heavy Armor"), suffixes
+// ("Backpack of Webwalking"), +N bonuses, and metal parentheticals.
+// Normalize a name for fuzzy matching: lowercase, curly apostrophes → straight,
+// strip punctuation except spaces, collapse whitespace.
+function _normalizeName(str) {
+  return str
+    .toLowerCase()
+    .replace(/[\u2018\u2019\u201A\u201B\u2032\u0060]/g, "'")  // curly/fancy apostrophes
+    .replace(/[^a-z0-9' ]/g, " ")                              // strip other punctuation
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function findInventoryItem(name) {
+  const { baseName } = parseItemModifiers(name);
+  const searchName  = baseName.toLowerCase();
+  const searchNorm  = _normalizeName(baseName);
+  const searchTokens = new Set(searchNorm.split(" ").filter(t => t.length > 1));
+
+  const ITEM_PACKS = ["vagabond.weapons", "vagabond.armor", "vagabond.gear", "vagabond.alchemical-items"];
+
+  // Phase 1: Exact match on full name, stripped name, or base name
+  for (const packId of ITEM_PACKS) {
+    const doc = await findInPack(packId, name)
+      || await findInPack(packId, _stripModifiers(name))
+      || await findInPack(packId, baseName);
     if (doc) return doc;
   }
+
+  // Phase 2: Longest compendium name that fits as a whole-word phrase inside the search name.
+  // Handles relic prefixes/suffixes ("Fire Resistant Heavy Armor" → "Heavy Armor").
+  // Uses word-boundary check to prevent "rats" matching inside "rations".
+  let bestMatch = null;
+  for (const packId of ITEM_PACKS) {
+    const index = await _getPackIndex(packId);
+    for (const entry of index) {
+      const eLower = entry.name.toLowerCase();
+      const idx = searchName.indexOf(eLower);
+      if (idx !== -1) {
+        const before = idx === 0 || /[\s,\-]/.test(searchName[idx - 1]);
+        const after  = idx + eLower.length === searchName.length || /[\s,\-]/.test(searchName[idx + eLower.length]);
+        if (before && after && (!bestMatch || eLower.length > bestMatch.nameLen)) {
+          bestMatch = { packId, entry, nameLen: eLower.length };
+        }
+      }
+    }
+  }
+  if (bestMatch) {
+    return await game.packs.get(bestMatch.packId).getDocument(bestMatch.entry._id);
+  }
+
+  // Phase 3: Token-set match — all tokens of the compendium name appear in the search tokens.
+  // Handles word-order differences ("Basic Acid" ↔ "Acid, Basic") and apostrophe variants.
+  let bestTokenMatch = null;
+  for (const packId of ITEM_PACKS) {
+    const index = await _getPackIndex(packId);
+    for (const entry of index) {
+      const eNorm   = _normalizeName(entry.name);
+      const eTokens = eNorm.split(" ").filter(t => t.length > 1);
+      if (eTokens.length === 0) continue;
+      // Every token of the compendium entry must exist in the search token set
+      const allMatch = eTokens.every(t => searchTokens.has(t));
+      if (allMatch && (!bestTokenMatch || eTokens.length > bestTokenMatch.tokenLen)) {
+        bestTokenMatch = { packId, entry, tokenLen: eTokens.length };
+      }
+    }
+  }
+  if (bestTokenMatch) {
+    return await game.packs.get(bestTokenMatch.packId).getDocument(bestTokenMatch.entry._id);
+  }
+
   return null;
 }
 
@@ -477,6 +878,14 @@ async function buildActorFromParsed(d) {
         if (shouldEquip && obj.system.equipmentType === "weapon") {
           obj.system.equipmentState = "oneHand";
         }
+
+        // Apply relic/metal modifiers (+N bonus, metal type, protection, spell power, rename)
+        const mods = parseItemModifiers(inv.name);
+        applyItemModifiers(obj, mods, inv.name);
+        // Fill in baseItemUuid if this is a relic
+        if (obj.flags?.vagabond?.relicForge && doc.uuid) {
+          obj.flags.vagabond.relicForge.baseItemUuid = doc.uuid;
+        }
       }
       itemDatas.push(obj);
     } else {
@@ -500,11 +909,14 @@ async function buildActorFromParsed(d) {
     warnings.push(`Spells skipped for non-spellcaster class: ${d.spells.join(", ")}. Add racial spells manually if needed.`);
   }
 
-  // Perks (from PDF abilities — traits/features are handled by ancestry/class)
-  for (const name of [...d.abilities.traits, ...d.abilities.classFeatures]) {
+  // Perks — use dedicated perks array if available, fall back to scanning all abilities
+  const perkNames = d.abilities.perks?.length
+    ? d.abilities.perks
+    : [...d.abilities.traits, ...d.abilities.classFeatures];
+  for (const name of perkNames) {
     const doc = await findInPack("vagabond.perks", name);
     if (doc) itemDatas.push(doc.toObject());
-    // Perks not found are silently skipped — they come from ancestry/class automatically
+    // Perks not found are silently skipped — traits/features come from ancestry/class
   }
 
   if (itemDatas.length) await actor.createEmbeddedDocuments("Item", itemDatas);
@@ -587,6 +999,72 @@ function parseFormFields(f) {
     skills[skill] = { trained: trained(field) };
   }
 
+  // ── Inventory ──────────────────────────────────────────────────────────────
+  // Weapons listed in Weapon 1/2/3 are the equipped weapon slots
+  const equippedWeaponNames = new Set();
+  for (let i = 1; i <= 3; i++) {
+    const w = get(`Weapon ${i}`);
+    if (w) equippedWeaponNames.add(w.toLowerCase().trim());
+  }
+
+  const inventory = [];
+  let armorEquipped = false;
+  for (let i = 1; i <= 14; i++) {
+    let name = get(`Inventory ${i}`);
+    if (!name) continue;
+
+    // Strip quantity suffix: "Javelin (2)" → "Javelin"
+    name = name.replace(/\s*\(\d+\)\s*$/, "").trim();
+    // Strip blank placeholders: "Rations (____ days)" → "Rations"
+    name = name.replace(/\s*\(_{2,}[^)]*\)\s*$/, "").trim();
+    if (!name) continue;
+
+    const nameLower = name.toLowerCase();
+    const isWeapon  = equippedWeaponNames.has(nameLower);
+    const isArmor   = /armor|robe/.test(nameLower);
+
+    let equipped = false;
+    if (isWeapon) {
+      equipped = true;
+    } else if (isArmor && !armorEquipped) {
+      equipped = true;
+      armorEquipped = true;
+    }
+
+    inventory.push({ name, equipped, slots: parseInt(get(`Item Slot ${i}`)) || 0 });
+  }
+
+  // ── Spells ─────────────────────────────────────────────────────────────────
+  // Magic 1 & 2 fields contain: "Name [Damage Base: Type]: Description\rCrit: ...\r\rName ..."
+  const spells = [];
+  for (const fieldName of ["Magic 1", "Magic 2"]) {
+    const raw = get(fieldName);
+    if (!raw) continue;
+    for (const entry of raw.split(/\r\r+/)) {
+      const line = entry.trim();
+      if (!line) continue;
+      // Spell name ends at " [" or ":"
+      const m = line.match(/^([^[:\r]+?)(?:\s*[\[:])/);
+      if (m) spells.push(m[1].trim());
+    }
+  }
+
+  // ── Abilities ──────────────────────────────────────────────────────────────
+  // Format: "Ability Name: Description\r\rAbility Name: Description\r\r..."
+  const classFeatures = [];
+  const abilitiesRaw = get("Abilities");
+  if (abilitiesRaw) {
+    for (const entry of abilitiesRaw.split(/\r\r+/)) {
+      const line = entry.trim();
+      if (!line) continue;
+      const colonIdx = line.indexOf(":");
+      if (colonIdx > 0) {
+        const abilityName = line.slice(0, colonIdx).trim();
+        if (abilityName) classFeatures.push(abilityName);
+      }
+    }
+  }
+
   return {
     name:      get("Name")     || "Unknown",
     level:     parseInt(get("Level")) || 1,
@@ -602,10 +1080,10 @@ function parseFormFields(f) {
       silver: parseInt(get("Wealth (s)")) || 0,
       copper: parseInt(get("Wealth (c)")) || 0,
     },
-    inventory: [],
-    spells:    [],
-    mana:      { max: 0, castMax: 0 },
-    abilities: { traits: [], classFeatures: [] },
+    inventory,
+    spells,
+    mana:      { max: parseInt(get("Max Mana")) || 0, castMax: parseInt(get("Casting Maximum")) || 0 },
+    abilities: { traits: [], classFeatures },
   };
 }
 
@@ -752,7 +1230,8 @@ class VagabondImportDialog extends Dialog {
       // Try form field parser first (interactive PDF)
       const fields = await extractFormFields(file);
       let data;
-      if (fields && fields["Name"]) {
+      // Pre-gens have a blank Name field — use Ancestry or Class as the reliable check
+      if (fields && (fields["Ancestry"] || fields["Class"])) {
         data = parseFormFields(fields);
         this._setStatus(status, "ok", "✓ Ready to import (interactive PDF)");
       } else {
