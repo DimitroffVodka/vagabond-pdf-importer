@@ -646,7 +646,7 @@ function applyItemModifiers(obj, mods, originalName) {
     obj.system.metal = mods.metal;
   } else if ((isWeapon || isArmor) &&
              (!obj.system.metal || obj.system.metal === "none" || obj.system.metal === "common")) {
-    obj.system.metal = "magical";
+    obj.system.metal = "common";
   }
 
   // ── Create Active Effects for each power ──
@@ -889,7 +889,10 @@ async function buildActorFromParsed(d) {
       }
       itemDatas.push(obj);
     } else {
-      warnings.push(`inventory: "${inv.name}" not found in compendium`);
+      // Not in compendium — create a generic item using the classifier
+      const classified = classifyItem(inv.name, inv.slots || 1, inv.equipped || false);
+      itemDatas.push({ name: inv.name, ...classified });
+      warnings.push(`inventory: "${inv.name}" not found in compendium — created as generic ${classified.system.equipmentType}`);
     }
   }
 
@@ -1040,7 +1043,7 @@ function parseFormFields(f) {
   for (const fieldName of ["Magic 1", "Magic 2"]) {
     const raw = get(fieldName);
     if (!raw) continue;
-    for (const entry of raw.split(/\r\r+/)) {
+    for (const entry of raw.split(/(?:\r\r+|\n\n+)/)) {
       const line = entry.trim();
       if (!line) continue;
       // Spell name ends at " [" or ":"
@@ -1051,10 +1054,11 @@ function parseFormFields(f) {
 
   // ── Abilities ──────────────────────────────────────────────────────────────
   // Format: "Ability Name: Description\r\rAbility Name: Description\r\r..."
+  // OBR exporter uses \n\n as separator, Foundry exporter uses \r\r
   const classFeatures = [];
   const abilitiesRaw = get("Abilities");
   if (abilitiesRaw) {
-    for (const entry of abilitiesRaw.split(/\r\r+/)) {
+    for (const entry of abilitiesRaw.split(/(?:\r\r+|\n\n+)/)) {
       const line = entry.trim();
       if (!line) continue;
       const colonIdx = line.indexOf(":");
